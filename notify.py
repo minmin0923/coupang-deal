@@ -43,11 +43,11 @@ def live_message(hits, when):
 def test_message(rows, stats, when):
     """등급/점수/괴리율/세부배점을 전부 보여줌. 임계값 조정용."""
     head = (f"🧪 <b>테스트 리포트</b>  {when:%m/%d %H:%M}\n"
-            f"<code>수집 {stats['collected']} · 하드컷통과 {stats['passed']} · "
-            f"네이버매칭 {stats['matched']} ({stats['match_rate']}%)</code>\n"
+            f"<code>수집 {stats['collected']} · 판정 {stats['matched']} · "
+            f"이력축적중 {stats['warming']}</code>\n"
             f"<code>등급 S{stats['S']} A{stats['A']} B{stats['B']} "
             f"C{stats['C']} D{stats['D']}</code>\n"
-            f"<code>발송컷 ratio≤{config.SEND_RATIO} / 절약≥{config.MIN_SAVING:,}</code>\n")
+            f"<code>발송컷 ratio≤{config.SEND_RATIO} / 하락≥{config.MIN_SAVING:,}</code>\n")
     lines = [head]
     for r in rows[:config.TEST_MAX_ITEMS]:
         parts = " ".join(f"{k}{v:+d}" for k, v in r["detail"].items() if v)
@@ -55,9 +55,8 @@ def test_message(rows, stats, when):
             f"\n{BADGE.get(r['grade'],'·')} <b>{r['grade']}</b> "
             f"<code>{r['score']}점 r={r['ratio']:.2f}</code>\n"
             f"<a href=\"{r['url']}\">{_esc(r['name'], 45)}</a>\n"
-            f"<code>쿠팡 {r['cp']:,} vs 기준 {r['np']:,}</code>\n"
-            f"<code>{parts}</code>\n"
-            f"<code>kw: {_esc(r['keyword'], 40)}</code>")
+            f"<code>현재 {r['cp']:,} vs 평소 {r['np']:,} (표본 {r['n_points']})</code>\n"
+            f"<code>{parts}</code>")
 
     if stats["rejects"]:
         top = sorted(stats["rejects"].items(), key=lambda x: -x[1])[:6]
