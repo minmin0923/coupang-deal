@@ -4,6 +4,7 @@
 사용법:
   python main.py selftest   쿠팡/텔레그램 연결 점검
   python main.py notice     채널 안내문 1회 발송 (고정용)
+  python main.py debug      쿠팡 API 원본 응답 출력 (필드명 확인용)
   python main.py test       수집 -> 판정 -> 진단리포트 텔레그램 발송
   python main.py dry        콘솔 출력만
   python main.py live       데일리 발송 (급락 + 골드박스)
@@ -317,6 +318,27 @@ def main():
 
     if mode == "selftest":
         run_selftest()
+        return
+
+    if mode == "debug":
+        # 쿠팡 API 원본 응답을 그대로 출력 — 원가/할인율 필드명 확인용
+        import json
+        print("=" * 60)
+        print("[골드박스 원본 응답]")
+        gb = coupang.goldbox()
+        print(f"총 {len(gb)}건")
+        for x in gb[:2]:
+            print(json.dumps(x, ensure_ascii=False, indent=2))
+        if gb:
+            print("\n>> 골드박스 필드 목록:", sorted(gb[0].keys()))
+        print("=" * 60)
+        print("[베스트카테고리(생활용품) 원본 응답]")
+        bc = coupang.best_category(1014, limit=2)
+        for x in bc[:2]:
+            print(json.dumps(x, ensure_ascii=False, indent=2))
+        if bc:
+            print("\n>> 베스트 필드 목록:", sorted(bc[0].keys()))
+        print("=" * 60)
         return
 
     if mode == "notice":
