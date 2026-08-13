@@ -39,6 +39,7 @@ jobs:
 
       - name: 상주 감시
         env:
+          PYTHONUNBUFFERED: "1"
           COUPANG_ACCESS_KEY: ${{ secrets.COUPANG_ACCESS_KEY }}
           COUPANG_SECRET_KEY: ${{ secrets.COUPANG_SECRET_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
