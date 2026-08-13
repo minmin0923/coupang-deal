@@ -3,13 +3,15 @@
 
 사용법:
   python main.py selftest   쿠팡/텔레그램 연결 점검
+  python main.py notice     채널 안내문 1회 발송 (고정용)
   python main.py test       수집 -> 판정 -> 진단리포트 텔레그램 발송
   python main.py dry        콘솔 출력만
   python main.py live       데일리 발송 (급락 + 골드박스)
   python main.py hunt       급락 감시 전용 (있을 때만 발송)
-  python main.py auto       ★ 스케줄 기본값 — 시각을 보고 데일리/급락을 알아서 선택
+  python main.py auto       스케줄 1회 실행 — 시각 보고 데일리/급락 선택
+  python main.py watch      ★ 상주 감시 — 러너를 켜둔 채 몇 분마다 계속 순회
 """
-import sys, time, collections
+import sys, time, collections, subprocess, traceback
 from datetime import datetime, timedelta, timezone
 
 import config, coupang, scoring, store, notify
@@ -115,7 +117,7 @@ def send_cards(con, hits, golds, now, at, header=None):
     notify.send(header or notify.header_message(len(hits), len(golds), now))
     time.sleep(0.4)
 
-    cap = (notify.deal_caption(star) if star in hits else notify.gold_caption(star))
+    cap = notify.deal_caption(star) if star in hits else notify.gold_caption(star)
     notify.send_photo(star.get("image"), cap)
     time.sleep(0.4)
 
@@ -151,6 +153,163 @@ def run_hunt(con, now, at):
     send_cards(con, hits, [], now, at, header=notify.hunt_header(len(hits), now))
 
 
+def attach_ref(con, items):
+    """모든 상품에 '비교가'를 붙인다. 못 붙이는 상품은 버린다.
+       우선순위: 쿠팡 원가 > 자체 이력 최고가
+
+       가격비교 없는 카드는 발송하지 않는다는 원칙을 여기서 강제한다.
+    """
+    out, dropped = [], 0
+    for it in items:
+        price = it["price"]
+        ref, label = 0, ""
+
+        api_orig = it.get("orig_price") or 0
+        rate = it.get("discount_rate") or 0
+        if api_orig > price:
+            ref, label = api_orig, "정상가"
+        else:
+            hist, n = store.ref_price(con, it["product_id"],
+                                      config.BASELINE_DAYS, config.REF_MIN_POINTS)
+            if hist and hist > price:
+                ref, label = hist, "최근 최고가"
+            elif rate > 0:                       # 최후: 할인율로 원가 역산
+                ref, label = round(price / (1 - rate / 100)), "정상가"
+
+        if not ref or (ref - price) / ref < config.REF_MIN_GAP:
+            dropped += 1
+            continue
+
+        it["ref"] = int(ref)
+        it["ref_label"] = label
+        it["off"] = int(round((1 - price / ref) * 100))
+        it["cut"] = int(ref - price)
+
+        # 인기 급상승 — 판매 순위가 크게 뛴 상품
+        cur = it.get("rank") or 999
+        prev, jump = store.rank_rise(con, it["product_id"], cur, config.RISE_DAYS)
+        it["rising"] = bool(prev and cur <= config.RISE_MAX_RANK
+                            and jump >= config.RISE_MIN_JUMP)
+        it["rank_prev"], it["rank_jump"] = prev, jump
+        out.append(it)
+    return out, dropped
+
+
+def slot_due(con, now):
+    """지금이 정기 발송 슬롯인지. 이미 보낸 슬롯이면 False."""
+    cur = now.hour * 60 + now.minute
+    for h, mi in config.DAILY_SLOTS:
+        start = h * 60 + mi
+        if start <= cur < start + config.SLOT_WINDOW:
+            key = f"{now:%Y-%m-%d}-{h:02d}{mi:02d}"
+            if store.get_meta(con, "last_slot") != key:
+                return key
+    return None
+
+
+def git_sync(tag=""):
+    """루프 도중 이력을 커밋. 러너가 죽어도 데이터가 남게 한다."""
+    try:
+        subprocess.run(["git", "config", "user.name", "deal-bot"], check=False)
+        subprocess.run(["git", "config", "user.email",
+                        "deal-bot@users.noreply.github.com"], check=False)
+        subprocess.run(["git", "add", "-A", "data/"], check=False)
+        r = subprocess.run(["git", "diff", "--staged", "--quiet"])
+        if r.returncode != 0:
+            subprocess.run(["git", "commit", "-m", f"watch {tag}"], check=False)
+            subprocess.run(["git", "pull", "--rebase", "--autostash"], check=False)
+            subprocess.run(["git", "push"], check=False)
+            print("  [git] 이력 저장됨")
+    except Exception as e:
+        print("  [git] 실패:", e)
+
+
+def one_cycle(con, now, at):
+    """1회 순회. 정기 슬롯이면 종합 발송, 아니면 급락만 실시간 발송."""
+    slot = slot_due(con, now)
+
+    # ── 정기 발송 (하루 3타임) ──────────────────────────
+    if slot:
+        print(f"[{at}] 정기 발송 슬롯 {slot}")
+        items, gold_ids, golds = fetch(verbose=False)
+        rows, _ = judge(con, items, gold_ids, at)
+        store.upsert(con, items, store.hour_bucket(at))
+        store.record_ranks(con, items, store.hour_bucket(at))
+
+        hits = [r for r in rows if r["grade"] in ("S", "A", "B")
+                and not store.recently_sent(con, r["product_id"], r["price"], at)]
+        hits, _ = attach_ref(con, hits)
+        hits = hits[:config.MAX_ALERTS]
+        hit_ids = {h["product_id"] for h in hits}
+
+        cand = [g for g in golds if g["product_id"] not in hit_ids
+                and not scoring.hard_cut(g)]
+        picks, dropped = attach_ref(con, cand)
+        fresh = [g for g in picks
+                 if not store.recently_sent(con, g["product_id"], g["price"], at)]
+        picks = (fresh or picks)[:config.GOLDBOX_SHOW]
+
+        print(f"  급락 {len(hits)} / 핫딜 {len(picks)} (비교가 없어 제외 {dropped})")
+        send_cards(con, hits, picks, now, at)
+        store.set_meta(con, "last_slot", slot)
+        return True
+
+    # ── 실시간 급락 감시 ────────────────────────────────
+    items, gold_ids, golds = fetch(verbose=False, cats=config.HUNT_CATEGORIES,
+                                   per=config.HUNT_PER_CATEGORY, with_gold=True)
+    rows, rejects = judge(con, items, gold_ids, at)
+    store.upsert(con, items, store.hour_bucket(at))   # 핫딜 상품도 이력 적재
+    store.record_ranks(con, items, store.hour_bucket(at))
+
+    hits = [r for r in rows if r["grade"] in ("S", "A")
+            and not store.recently_sent(con, r["product_id"], r["price"], at)]
+    hits, no_ref = attach_ref(con, hits)
+    hits = hits[:config.HUNT_MAX_CARDS]
+
+    warming = sum(v for k, v in rejects.items() if k.startswith("이력축적중"))
+    print(f"[{at}] 수집 {len(items)} · 판정 {len(rows)} · 축적중 {warming} "
+          f"· 급락 {len(hits)}" + (f" (비교가없음 {no_ref})" if no_ref else ""))
+
+    if hits:
+        send_cards(con, hits, [], now, at,
+                   header=notify.hunt_header(len(hits), now))
+        print(f"  🚨 급락 {len(hits)}건 즉시 발송")
+        return True
+    return False
+
+
+def run_watch(con):
+    """러너를 켜둔 채 계속 순회. 급락이 뜨는 즉시 알린다."""
+    started = datetime.now(KST)
+    deadline = started + timedelta(minutes=config.WATCH_MINUTES)
+    print(f"상주 감시 시작 — {config.WATCH_INTERVAL_SEC}초 간격, "
+          f"{config.WATCH_MINUTES}분간 (~{deadline:%H:%M})")
+
+    n = 0
+    while datetime.now(KST) < deadline:
+        n += 1
+        now = datetime.now(KST)
+        at = now.strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            one_cycle(con, now, at)
+        except Exception:
+            print("  [오류] 이번 순회 건너뜀")
+            traceback.print_exc()
+
+        if n % config.WATCH_SYNC_EVERY == 0:
+            store.prune(con, config.PRUNE_DAYS)
+            git_sync(f"{now:%m-%d %H:%M}")
+
+        remain = (deadline - datetime.now(KST)).total_seconds()
+        if remain <= 0:
+            break
+        time.sleep(min(config.WATCH_INTERVAL_SEC, remain))
+
+    store.prune(con, config.PRUNE_DAYS)
+    git_sync("final")
+    print(f"상주 감시 종료 — 총 {n}회 순회")
+
+
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "dry"
     now = datetime.now(KST)
@@ -160,11 +319,23 @@ def main():
         run_selftest()
         return
 
+    if mode == "notice":
+        # 채널 안내문 발송 -> 텔레그램에서 길게 눌러 '고정'하면 끝
+        notify.send(notify.pinned_notice())
+        print("안내문 발송 완료. 텔레그램에서 해당 메시지를 고정하세요.")
+        return
+
     con = store.connect()
+
+    if mode == "watch":
+        print(f"[{at}] mode=watch")
+        run_watch(con)
+        con.close()
+        return
 
     if mode == "auto":
         # 데일리 시각의 첫 실행(정시~19분)이면 전체 발송, 아니면 급락 감시만
-        mode = "live" if (now.hour in config.DAILY_HOURS and now.minute < 20) else "hunt"
+        mode = "live" if slot_due(con, now) else "hunt"
         print(f"[auto] {now:%H:%M} -> {mode}")
 
     if mode == "hunt":

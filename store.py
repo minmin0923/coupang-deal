@@ -25,6 +25,13 @@ CREATE TABLE IF NOT EXISTS alerts_sent (
     product_id TEXT, price INTEGER, sent_at TEXT,
     PRIMARY KEY (product_id, price)
 );
+CREATE TABLE IF NOT EXISTS rank_history (
+    product_id TEXT, rank INTEGER, captured_at TEXT,
+    PRIMARY KEY (product_id, captured_at)
+);
+CREATE TABLE IF NOT EXISTS meta (
+    k TEXT PRIMARY KEY, v TEXT
+);
 CREATE INDEX IF NOT EXISTS idx_hist_pid ON price_history(product_id);
 CREATE INDEX IF NOT EXISTS idx_jud_time ON judgments(captured_at);
 """
@@ -79,6 +86,37 @@ def s_count_today(con, at):
         WHERE grade='S' AND date(captured_at)=date(?)""", (at,)).fetchone()[0]
 
 
+def record_ranks(con, items, at):
+    """판매 순위 이력. '인기 급상승' 판정의 근거."""
+    for it in items:
+        r = it.get("rank")
+        if it.get("product_id") and r and r < 900:
+            con.execute("INSERT OR IGNORE INTO rank_history VALUES (?,?,?)",
+                        (it["product_id"], int(r), at))
+    con.commit()
+
+
+def rank_rise(con, pid, cur_rank, days=3):
+    """(이전 최악 순위, 상승폭). 이력이 없으면 (None, 0).
+       예: 3일 전 62위 -> 지금 9위  =>  (62, 53)"""
+    row = con.execute("""SELECT MAX(rank) FROM rank_history WHERE product_id=?
+        AND captured_at >= datetime('now', ?)""", (pid, f"-{days} days")).fetchone()
+    if not row or row[0] is None:
+        return None, 0
+    prev = int(row[0])
+    return prev, max(0, prev - int(cur_rank))
+
+
+def get_meta(con, k, default=None):
+    r = con.execute("SELECT v FROM meta WHERE k=?", (k,)).fetchone()
+    return r[0] if r else default
+
+
+def set_meta(con, k, v):
+    con.execute("INSERT OR REPLACE INTO meta VALUES (?,?)", (k, str(v)))
+    con.commit()
+
+
 def prune(con, days):
     """오래된 이력 삭제 — DB가 무한정 커지는 걸 막는다."""
     con.execute("DELETE FROM price_history WHERE captured_at < datetime('now', ?)",
@@ -93,6 +131,17 @@ def hour_bucket(at: str) -> str:
     """'2026-08-13 14:37:02' -> '2026-08-13 14:00:00'
        20분마다 돌아도 시간당 1건만 남겨 DB 폭증을 막는다."""
     return at[:13] + ":00:00"
+
+
+def ref_price(con, pid, days=14, min_points=2):
+    """표시용 비교가. 최근 최고가를 쓴다 — 표본 2개만 있어도 나온다.
+       (판정용 중앙값과 달리, 사람 눈에 보여줄 '원래 이 값이었다'는 숫자)"""
+    rows = con.execute("""SELECT price FROM price_history WHERE product_id=?
+        AND captured_at >= datetime('now', ?)""", (pid, f"-{days} days")).fetchall()
+    prices = [r[0] for r in rows]
+    if len(prices) < min_points:
+        return None, 0
+    return max(prices), len(prices)
 
 
 def baseline_with_count(con, pid, days=30, min_points=6):
