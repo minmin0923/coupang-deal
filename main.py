@@ -31,18 +31,20 @@ def fetch(verbose=True):
             print(f"  {cname}: {len(raw)}건")
         time.sleep(1.5)
 
+    golds = []
     for x in coupang.goldbox():
         n = coupang.normalize(x)
         n["rank"] = 5
+        n["category_name"] = n["category_name"] or "특가"
         gold_ids.add(n["product_id"])
-        items.append(n)
+        items.append(n); golds.append(n)
     if verbose:
-        print(f"  골드박스: {len(gold_ids)}건")
+        print(f"  골드박스: {len(golds)}건")
 
     dedup = {}
     for it in items:
         dedup.setdefault(it["product_id"], it)
-    return list(dedup.values()), gold_ids
+    return list(dedup.values()), gold_ids, golds
 
 
 def judge(con, items, gold_ids, at):
@@ -112,7 +114,7 @@ def main():
     con = store.connect()
     print(f"[{at}] mode={mode}")
 
-    items, gold = fetch()
+    items, gold, golds = fetch()
     print(f"수집 {len(items)}건 (중복제거 후)")
 
     rows, rejects = judge(con, items, gold, at)      # 저장 전에 판정
@@ -133,10 +135,24 @@ def main():
         hits = [r for r in rows if r["grade"] in ("S", "A", "B")
                 and not store.recently_sent(con, r["product_id"], r["price"], at)]
         hits = hits[:config.MAX_ALERTS]
-        if hits and notify.send(notify.live_message(hits, now)):
-            for h in hits:
-                store.mark_sent(con, h["product_id"], h["price"], at)
-        print(f"발송 {len(hits)}건")
+        hit_ids = {h["product_id"] for h in hits}
+
+        # 골드박스로 채우기 — 24시간 내 올린 건 건너뛰어 자동 로테이션
+        picks = [g for g in golds
+                 if g["product_id"] not in hit_ids
+                 and g["price"] >= config.MIN_PRICE
+                 and not scoring.hard_cut(g)
+                 and not store.recently_sent(con, g["product_id"], g["price"], at)]
+        if not picks:      # 24시간 필터로 다 걸러졌으면 채널이 비지 않게 재사용
+            picks = [g for g in golds if g["product_id"] not in hit_ids
+                     and not scoring.hard_cut(g)][:4]
+        picks = picks[:config.GOLDBOX_SHOW]
+
+        msg = notify.live_message(hits, picks, now)
+        if msg and notify.send(msg):
+            for x in hits + picks:
+                store.mark_sent(con, x["product_id"], x["price"], at)
+        print(f"발송 — 급락 {len(hits)}건 / 골드박스 {len(picks)}건")
 
     else:
         for r in rows[:20]:
