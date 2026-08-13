@@ -133,7 +133,7 @@ def send_cards(con, hits, golds, now, at, header=None):
 
 def run_hunt(con, now, at):
     """급락 감시 전용 — 있을 때만 발송, 없으면 조용히 종료."""
-    items, gold_ids, _ = fetch(cats=config.HUNT_CATEGORIES,
+    items, gold_ids, _ = fetch(cats=hunt_batch(),
                                per=config.HUNT_PER_CATEGORY, with_gold=False)
     print(f"수집 {len(items)}건")
 
@@ -152,6 +152,24 @@ def run_hunt(con, now, at):
         print("급락 없음 — 발송 안 함")
         return
     send_cards(con, hits, [], now, at, header=notify.hunt_header(len(hits), now))
+
+
+_ROTATE = {"i": 0}
+
+
+def hunt_batch():
+    """매 순회 스캔할 카테고리. 고정 카테고리 + 나머지를 순환.
+       순회당 API 부하는 그대로 두고 전체 카테고리를 12분 안에 한 바퀴 돈다."""
+    rest = [k for k in config.CATEGORIES if k not in config.HUNT_ALWAYS]
+    if not rest:
+        return dict(config.HUNT_ALWAYS)
+    i = _ROTATE["i"]
+    picked = [rest[(i + n) % len(rest)] for n in range(config.HUNT_BATCH)]
+    _ROTATE["i"] = (i + config.HUNT_BATCH) % len(rest)
+    out = dict(config.HUNT_ALWAYS)
+    for k in picked:
+        out[k] = config.CATEGORIES[k]
+    return out
 
 
 def attach_ref(con, items):
@@ -261,7 +279,7 @@ def one_cycle(con, now, at):
         return True
 
     # ── 실시간 급락 감시 ────────────────────────────────
-    items, gold_ids, golds = fetch(verbose=False, cats=config.HUNT_CATEGORIES,
+    items, gold_ids, golds = fetch(verbose=False, cats=hunt_batch(),
                                    per=config.HUNT_PER_CATEGORY, with_gold=True)
     rows, rejects = judge(con, items, gold_ids, at)
     store.upsert(con, items, store.hour_bucket(at))   # 핫딜 상품도 이력 적재
