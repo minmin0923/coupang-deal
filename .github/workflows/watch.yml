@@ -14,7 +14,7 @@ on:
         required: true
         default: "watch"
         type: choice
-        options: [watch, notice, selftest, live, hunt, test, dry]
+        options: [watch, notice, debug, selftest, live, hunt, test, dry]
   push:
     branches: [main]          # 코드 수정 시 즉시 최신본으로 재시작
 
@@ -39,7 +39,7 @@ jobs:
 
       - name: 상주 감시
         env:
-          PYTHONUNBUFFERED: "1"
+          PYTHONUNBUFFERED: "1"          # 로그를 실시간으로 흘려보냄
           COUPANG_ACCESS_KEY: ${{ secrets.COUPANG_ACCESS_KEY }}
           COUPANG_SECRET_KEY: ${{ secrets.COUPANG_SECRET_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
