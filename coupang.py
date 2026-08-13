@@ -75,6 +75,12 @@ def normalize(item: dict, category_id=None) -> dict:
         "is_rocket": bool(item.get("isRocket")),
         "free_ship": bool(item.get("isFreeShipping")),
         "rank": item.get("rank") or 999,
+        # 골드박스 응답에 원가/할인율이 실려 오는 경우가 있어 방어적으로 수집
+        "orig_price": int(item.get("originalPrice")
+                          or item.get("basePrice")
+                          or item.get("productOriginalPrice") or 0),
+        "discount_rate": int(item.get("discountRate")
+                             or item.get("productDiscountRate") or 0),
         "category_id": category_id,
         "category_name": item.get("categoryName") or "",
     }
