@@ -5,6 +5,7 @@
   python main.py selftest   쿠팡/텔레그램 연결 점검
   python main.py notice     채널 안내문 1회 발송 (고정용)
   python main.py debug      쿠팡 API 원본 응답 출력 (필드명 확인용)
+  python main.py testpost   ★ 지금 즉시 정기 발송 1회 (시각 무관, 테스트용)
   python main.py test       수집 -> 판정 -> 진단리포트 텔레그램 발송
   python main.py dry        콘솔 출력만
   python main.py live       데일리 발송 (급락 + 골드박스)
@@ -214,6 +215,45 @@ def attach_ref(con, items):
     return out, dropped
 
 
+def apply_quota(pool, limit):
+    """카테고리 그룹별 배분을 지켜 뽑는다.
+       한 그룹에 물량이 없으면 남은 자리는 다른 그룹으로 채운다(빈칸 방지)."""
+    gof = {}
+    for g, cids in config.CATEGORY_GROUPS.items():
+        for cid in cids:
+            gof[cid] = g
+
+    buckets = {g: [] for g in config.CATEGORY_GROUPS}
+    for it in pool:                       # pool은 이미 우선순위 순으로 정렬돼 있음
+        g = gof.get(it.get("category_id"))
+        if g:
+            buckets[g].append(it)
+
+    picked, used = [], set()
+    for g, quota in config.GROUP_QUOTA.items():
+        # 그룹 안에서도 카테고리를 번갈아 뽑아 한 카테고리 도배를 막는다
+        bycat = {}
+        for it in buckets.get(g, []):
+            bycat.setdefault(it["category_id"], []).append(it)
+        order = sorted(bycat, key=lambda c: -len(bycat[c]))
+        n, ring = 0, 0
+        while n < quota and any(bycat.values()):
+            cid = order[ring % len(order)]
+            ring += 1
+            if bycat[cid]:
+                it = bycat[cid].pop(0)
+                picked.append(it); used.add(it["product_id"]); n += 1
+
+    for it in pool:                       # 남은 자리 채우기
+        if len(picked) >= limit:
+            break
+        if it["product_id"] not in used:
+            picked.append(it); used.add(it["product_id"])
+
+    picked.sort(key=lambda x: (not x.get("rising"), -x["off"]))
+    return picked[:limit]
+
+
 def slot_due(con, now):
     """지금이 정기 발송 슬롯인지. 이미 보낸 슬롯이면 False."""
     cur = now.hour * 60 + now.minute
@@ -243,9 +283,10 @@ def git_sync(tag=""):
         print("  [git] 실패:", e)
 
 
-def one_cycle(con, now, at):
-    """1회 순회. 정기 슬롯이면 종합 발송, 아니면 급락만 실시간 발송."""
-    slot = slot_due(con, now)
+def one_cycle(con, now, at, force_daily=False, mark=True):
+    """1회 순회. 정기 슬롯이면 종합 발송, 아니면 급락만 실시간 발송.
+       force_daily=True 면 시각과 무관하게 정기 발송을 강제한다(테스트용)."""
+    slot = "TEST" if force_daily else slot_due(con, now)
 
     # ── 정기 발송 (하루 3타임) ──────────────────────────
     if slot:
@@ -271,11 +312,12 @@ def one_cycle(con, now, at):
         priced.sort(key=lambda g: (not g.get("rising"), -g["off"]))
         fresh = [g for g in priced
                  if not store.recently_sent(con, g["product_id"], g["price"], at)]
-        picks = (fresh or priced)[:config.GOLDBOX_SHOW]
+        picks = apply_quota(fresh or priced, config.GOLDBOX_SHOW)
 
         print(f"  급락 {len(hits)} / 핫딜 {len(picks)} · 후보 {len(cand)} · 비교가없음 {dropped}")
         send_cards(con, hits, picks, now, at)
-        store.set_meta(con, "last_slot", slot)
+        if mark:
+            store.set_meta(con, "last_slot", slot)
         return True
 
     # ── 실시간 급락 감시 ────────────────────────────────
@@ -389,6 +431,14 @@ def main():
         con.close()
         return
 
+    if mode in ("live", "testpost"):
+        # testpost: 시각 무관하게 정기 발송을 강제한다.
+        # 슬롯 기록을 남기지 않아 다음 정기 발송(08:00)에 영향이 없다.
+        print(f"[{at}] mode={mode}")
+        one_cycle(con, now, at, force_daily=True, mark=(mode == "live"))
+        con.close()
+        return
+
     print(f"[{at}] mode={mode}")
 
     items, gold, golds = fetch()
@@ -405,29 +455,6 @@ def main():
 
     if mode == "test":
         notify.send(notify.test_message(rows, stats, now))
-
-    elif mode == "live":
-        if stats["S"] > config.MAX_S_PER_DAY:
-            notify.send(f"⚠️ S등급 {stats['S']}건 — 로직 오류 의심. 발송 중단.")
-            con.close(); return
-        hits = [r for r in rows if r["grade"] in ("S", "A", "B")
-                and not store.recently_sent(con, r["product_id"], r["price"], at)]
-        hits = hits[:config.MAX_ALERTS]
-        hit_ids = {h["product_id"] for h in hits}
-
-        # 골드박스로 채우기 — 24시간 내 올린 건 건너뛰어 자동 로테이션
-        picks = [g for g in golds
-                 if g["product_id"] not in hit_ids
-                 and g["price"] >= config.MIN_PRICE
-                 and not scoring.hard_cut(g)
-                 and not store.recently_sent(con, g["product_id"], g["price"], at)]
-        if not picks:      # 24시간 필터로 다 걸러졌으면 채널이 비지 않게 재사용
-            picks = [g for g in golds if g["product_id"] not in hit_ids
-                     and not scoring.hard_cut(g)][:4]
-        picks = picks[:config.GOLDBOX_SHOW]
-
-        send_cards(con, hits, picks, now, at)
-        print(f"발송 — 급락 {len(hits)}건 / 골드박스 {len(picks)}건")
 
     else:
         for r in rows[:20]:
