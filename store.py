@@ -79,8 +79,15 @@ def s_count_today(con, at):
         WHERE grade='S' AND date(captured_at)=date(?)""", (at,)).fetchone()[0]
 
 
-def baseline(con, pid, days=30, min_points=6):
+def baseline_with_count(con, pid, days=30, min_points=6):
+    """(중앙값, 표본수). 표본이 모자라면 (None, 표본수)."""
     rows = con.execute("""SELECT price FROM price_history WHERE product_id=?
         AND captured_at >= datetime('now', ?)""", (pid, f"-{days} days")).fetchall()
     prices = [r[0] for r in rows]
-    return statistics.median(prices) if len(prices) >= min_points else None
+    if len(prices) < min_points:
+        return None, len(prices)
+    return statistics.median(prices), len(prices)
+
+
+def baseline(con, pid, days=30, min_points=6):
+    return baseline_with_count(con, pid, days, min_points)[0]
