@@ -5,7 +5,9 @@
   python main.py selftest   쿠팡/텔레그램 연결 점검
   python main.py test       수집 -> 판정 -> 진단리포트 텔레그램 발송
   python main.py dry        콘솔 출력만
-  python main.py live       실제 딜 발송
+  python main.py live       데일리 발송 (급락 + 골드박스)
+  python main.py hunt       급락 감시 전용 (있을 때만 발송)
+  python main.py auto       ★ 스케줄 기본값 — 시각을 보고 데일리/급락을 알아서 선택
 """
 import sys, time, collections
 from datetime import datetime, timedelta, timezone
@@ -16,12 +18,12 @@ KST = timezone(timedelta(hours=9))
 GRADE_ORDER = {"S": 4, "A": 3, "B": 2, "C": 1, "D": 0}
 
 
-def fetch(verbose=True):
+def fetch(verbose=True, cats=None, per=None, with_gold=True):
     """수집만. DB 저장은 판정 뒤에 한다(오늘 값이 기준가에 섞이지 않게)."""
     items, gold_ids = [], set()
 
-    for cid, cname in config.CATEGORIES.items():
-        raw = coupang.best_category(cid, limit=config.PER_CATEGORY)
+    for cid, cname in (cats or config.CATEGORIES).items():
+        raw = coupang.best_category(cid, limit=per or config.PER_CATEGORY)
         for i, x in enumerate(raw, start=1):
             n = coupang.normalize(x, cid)
             n["rank"] = x.get("rank") or i
@@ -29,10 +31,10 @@ def fetch(verbose=True):
             items.append(n)
         if verbose:
             print(f"  {cname}: {len(raw)}건")
-        time.sleep(1.5)
+        time.sleep(config.CATEGORY_WAIT)
 
     golds = []
-    for x in coupang.goldbox():
+    for x in (coupang.goldbox() if with_gold else []):
         n = coupang.normalize(x)
         n["rank"] = 5
         n["category_name"] = n["category_name"] or "특가"
@@ -102,6 +104,53 @@ def run_selftest():
     notify.send(msg)
 
 
+def send_cards(con, hits, golds, now, at, header=None):
+    """대표 1건만 썸네일 카드, 나머지는 한 메시지로 묶어 발송."""
+    if not hits and not golds:
+        return 0
+    pool = hits + golds
+    # 대표 = 급락 우선, 그중 점수/판매순위가 가장 좋은 것
+    star = min(pool, key=lambda x: (0 if x in hits else 1, x.get("rank") or 999))
+
+    notify.send(header or notify.header_message(len(hits), len(golds), now))
+    time.sleep(0.4)
+
+    cap = (notify.deal_caption(star) if star in hits else notify.gold_caption(star))
+    notify.send_photo(star.get("image"), cap)
+    time.sleep(0.4)
+
+    rest = notify.list_message(hits, golds, now, skip_id=star["product_id"])
+    if rest:
+        notify.send(rest)
+
+    for x in pool:
+        store.mark_sent(con, x["product_id"], x["price"], at)
+    return len(pool)
+
+
+def run_hunt(con, now, at):
+    """급락 감시 전용 — 있을 때만 발송, 없으면 조용히 종료."""
+    items, gold_ids, _ = fetch(cats=config.HUNT_CATEGORIES,
+                               per=config.HUNT_PER_CATEGORY, with_gold=False)
+    print(f"수집 {len(items)}건")
+
+    rows, rejects = judge(con, items, gold_ids, at)
+    store.upsert(con, items, store.hour_bucket(at))   # 시간당 1건만 적재
+    store.prune(con, config.PRUNE_DAYS)
+
+    hits = [r for r in rows if r["grade"] in ("S", "A")
+            and not store.recently_sent(con, r["product_id"], r["price"], at)]
+    hits = hits[:config.HUNT_MAX_CARDS]
+
+    warming = sum(v for k, v in rejects.items() if k.startswith("이력축적중"))
+    print(f"판정 {len(rows)} / 이력축적중 {warming} / 급락 {len(hits)}")
+
+    if not hits:
+        print("급락 없음 — 발송 안 함")
+        return
+    send_cards(con, hits, [], now, at, header=notify.hunt_header(len(hits), now))
+
+
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "dry"
     now = datetime.now(KST)
@@ -112,13 +161,26 @@ def main():
         return
 
     con = store.connect()
+
+    if mode == "auto":
+        # 데일리 시각의 첫 실행(정시~19분)이면 전체 발송, 아니면 급락 감시만
+        mode = "live" if (now.hour in config.DAILY_HOURS and now.minute < 20) else "hunt"
+        print(f"[auto] {now:%H:%M} -> {mode}")
+
+    if mode == "hunt":
+        print(f"[{at}] mode=hunt")
+        run_hunt(con, now, at)
+        con.close()
+        return
+
     print(f"[{at}] mode={mode}")
 
     items, gold, golds = fetch()
     print(f"수집 {len(items)}건 (중복제거 후)")
 
     rows, rejects = judge(con, items, gold, at)      # 저장 전에 판정
-    store.upsert(con, items, at)                      # 그다음 오늘 값 적재
+    store.upsert(con, items, store.hour_bucket(at))   # 그다음 오늘 값 적재
+    store.prune(con, config.PRUNE_DAYS)
 
     stats = build_stats(items, rows, rejects)
     print(f"판정 {stats['matched']}건 / 이력축적중 {stats['warming']}건")
@@ -148,19 +210,7 @@ def main():
                      and not scoring.hard_cut(g)][:4]
         picks = picks[:config.GOLDBOX_SHOW]
 
-        if hits or picks:
-            notify.send(notify.header_message(len(hits), len(picks), now))
-            sent = []
-            for h in hits:
-                if notify.send_photo(h.get("image"), notify.deal_caption(h)):
-                    sent.append(h)
-                time.sleep(0.6)          # 텔레그램 속도 제한 여유
-            for g in picks:
-                if notify.send_photo(g.get("image"), notify.gold_caption(g)):
-                    sent.append(g)
-                time.sleep(0.6)
-            for x in sent:
-                store.mark_sent(con, x["product_id"], x["price"], at)
+        send_cards(con, hits, picks, now, at)
         print(f"발송 — 급락 {len(hits)}건 / 골드박스 {len(picks)}건")
 
     else:

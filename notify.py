@@ -93,8 +93,9 @@ def deal_caption(h):
     return (f"{urgent}🎁 <b>{off}% 파격 특가!</b>\n"
             f"<b>{_esc(h['name'], 70)}</b>\n"
             f"{_meta_line(h, h['cp'])}\n\n"
-            f"💵 <s>{h['np']:,}원</s> → <b>{h['cp']:,}원</b>\n"
-            f"💰 <b>{h['saving']:,}원 절약</b>{_tail(h, h['cp'])}\n"
+            f"　평소가  <s>{h['np']:,}원</s>\n"
+            f"🔥 <b>지금  {h['cp']:,}원</b>\n"
+            f"💰 <b>{h['saving']:,}원 ↓ ({off}% 할인)</b>{_tail(h, h['cp'])}\n\n"
             f"🔗 <a href=\"{h['url']}\">쿠팡에서 보기</a>")
 
 
@@ -114,10 +115,13 @@ def gold_caption(g):
     lines.append(_meta_line(g, price) + "\n")
 
     if orig > price:
-        lines.append(f"💵 <s>{orig:,}원</s> → <b>{price:,}원</b>")
-        lines.append(f"💰 <b>{orig - price:,}원 절약</b>{_tail(g, price)}")
+        off = rate or int(round((1 - price / orig) * 100))
+        lines.append(f"　정상가  <s>{orig:,}원</s>")
+        lines.append(f"🔥 <b>특가　 {price:,}원</b>")
+        lines.append(f"💰 <b>{orig - price:,}원 ↓ ({off}% 할인)</b>{_tail(g, price)}")
     else:
-        lines.append(f"💵 <b>{price:,}원</b>{_tail(g, price)}")
+        lines.append(f"🔥 <b>특가  {price:,}원</b>{_tail(g, price)}")
+    lines.append("")
     lines.append(f"🔗 <a href=\"{g['url']}\">쿠팡에서 보기</a>")
     return "\n".join(lines)
 
@@ -150,6 +154,52 @@ def header_message(n_hits, n_golds, when):
     p.append("\n<i>가격·재고는 실시간 변동됩니다. 구매 전 확인하세요.</i>")
     p.append("<i>이 채널은 쿠팡 파트너스 활동의 일환으로 수수료를 제공받습니다.</i>")
     return "\n".join(p)
+
+
+def _row(i, item, price, orig=0, off=0, saving=0):
+    up = _unit_price(item["name"], price)
+    unit = f" · 개당 {up:,}원" if up else ""
+    head = f"<b>{off}%↓</b> " if off else ""
+    body = (f"<s>{orig:,}</s> → <b>{price:,}원</b>" if orig > price
+            else f"<b>{price:,}원</b>")
+    return (f"\n{i}. {head}{_cat(item.get('category_name'))} "
+            f"<a href=\"{item['url']}\">{_esc(item['name'], 42)}</a>\n"
+            f"　 {body}"
+            + (f"  (💰{saving:,}원↓)" if saving else "")
+            + unit)
+
+
+def list_message(hits, golds, when, skip_id=None):
+    """대표 상품 외 나머지를 한 메시지로 묶는다 (도배 방지)."""
+    p, i = [], 0
+    rest_h = [h for h in hits if h["product_id"] != skip_id]
+    rest_g = [g for g in golds if g["product_id"] != skip_id]
+
+    if rest_h:
+        p.append("\n🚨 <b>급락 포착</b>")
+        for h in rest_h:
+            i += 1
+            off = int(round((1 - h["ratio"]) * 100))
+            p.append(_row(i, h, h["cp"], h["np"], off, h["saving"]))
+
+    if rest_g:
+        p.append("\n\n⭐ <b>오늘의 골드박스</b>")
+        for g in rest_g:
+            i += 1
+            orig = g.get("orig_price") or 0
+            rate = g.get("discount_rate") or 0
+            off = rate or (int(round((1 - g["price"] / orig) * 100)) if orig > g["price"] else 0)
+            p.append(_row(i, g, g["price"], orig, off,
+                          orig - g["price"] if orig > g["price"] else 0))
+
+    if not p:
+        return ""
+    return "".join(p) + config.FOOTER
+
+
+def hunt_header(n, when):
+    return (f"🚨 <b>급락 포착!</b>  {_when(when)}\n"
+            f"<i>평소가 대비 크게 떨어진 상품 {n}건</i>")
 
 
 def pinned_notice():

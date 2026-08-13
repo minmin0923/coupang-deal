@@ -79,6 +79,22 @@ def s_count_today(con, at):
         WHERE grade='S' AND date(captured_at)=date(?)""", (at,)).fetchone()[0]
 
 
+def prune(con, days):
+    """오래된 이력 삭제 — DB가 무한정 커지는 걸 막는다."""
+    con.execute("DELETE FROM price_history WHERE captured_at < datetime('now', ?)",
+                (f"-{days} days",))
+    con.execute("DELETE FROM judgments WHERE captured_at < datetime('now', ?)",
+                (f"-{days} days",))
+    con.execute("DELETE FROM alerts_sent WHERE sent_at < datetime('now', '-7 days')")
+    con.commit()
+
+
+def hour_bucket(at: str) -> str:
+    """'2026-08-13 14:37:02' -> '2026-08-13 14:00:00'
+       20분마다 돌아도 시간당 1건만 남겨 DB 폭증을 막는다."""
+    return at[:13] + ":00:00"
+
+
 def baseline_with_count(con, pid, days=30, min_points=6):
     """(중앙값, 표본수). 표본이 모자라면 (None, 표본수)."""
     rows = con.execute("""SELECT price FROM price_history WHERE product_id=?
