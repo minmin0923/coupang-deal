@@ -1,0 +1,46 @@
+name: 상주 감시 (실시간)
+
+# Public 레포에서만 쓰세요. Private면 무료 2,000분이 나흘 만에 소진됩니다.
+#
+# 정기 발송  KST 08:00 / 12:30 / 18:00 / 21:00  (핫딜 + 급락 종합)
+# 실시간 감시 그 외 3분마다, 급락 포착 시에만 별도 발송
+on:
+  schedule:
+    - cron: "0 */5 * * *"     # 5시간마다 새 러너 시작 (이전 러너 종료 직후 이어받음)
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "실행 모드 (기본 watch)"
+        required: true
+        default: "watch"
+        type: choice
+        options: [watch, notice, selftest, live, hunt, test, dry]
+  push:
+    branches: [main]          # 코드 수정 시 즉시 최신본으로 재시작
+
+permissions:
+  contents: write
+
+concurrency:
+  group: coupang-watch
+  cancel-in-progress: true    # 새 러너가 옛 러너를 대체 — 중복 실행 방지
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300      # GitHub 상한은 360분
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -q -r requirements.txt
+
+      - name: 상주 감시
+        env:
+          COUPANG_ACCESS_KEY: ${{ secrets.COUPANG_ACCESS_KEY }}
+          COUPANG_SECRET_KEY: ${{ secrets.COUPANG_SECRET_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python main.py "${{ inputs.mode || 'watch' }}"
