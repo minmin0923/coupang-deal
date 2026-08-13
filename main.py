@@ -243,14 +243,19 @@ def one_cycle(con, now, at):
         hits = hits[:config.MAX_ALERTS]
         hit_ids = {h["product_id"] for h in hits}
 
-        cand = [g for g in golds if g["product_id"] not in hit_ids
-                and not scoring.hard_cut(g)]
-        picks, dropped = attach_ref(con, cand)
-        fresh = [g for g in picks
+        # 핫딜 섹션: 추적 중인 인기상품 전체에서 '자기 과거보다 싸진 것'을 고른다.
+        # (골드박스만 보면 원가를 알 수 없어 늘 비어버림 — 실측으로 확인됨)
+        cand = [it for it in items
+                if it["product_id"] not in hit_ids and not scoring.hard_cut(it)]
+        priced, dropped = attach_ref(con, cand)
+        priced = [g for g in priced
+                  if g["off"] >= config.DAILY_MIN_OFF and g["cut"] >= config.DAILY_MIN_CUT]
+        priced.sort(key=lambda g: (not g.get("rising"), -g["off"]))
+        fresh = [g for g in priced
                  if not store.recently_sent(con, g["product_id"], g["price"], at)]
-        picks = (fresh or picks)[:config.GOLDBOX_SHOW]
+        picks = (fresh or priced)[:config.GOLDBOX_SHOW]
 
-        print(f"  급락 {len(hits)} / 핫딜 {len(picks)} (비교가 없어 제외 {dropped})")
+        print(f"  급락 {len(hits)} / 핫딜 {len(picks)} · 후보 {len(cand)} · 비교가없음 {dropped}")
         send_cards(con, hits, picks, now, at)
         store.set_meta(con, "last_slot", slot)
         return True

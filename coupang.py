@@ -75,12 +75,10 @@ def normalize(item: dict, category_id=None) -> dict:
         "is_rocket": bool(item.get("isRocket")),
         "free_ship": bool(item.get("isFreeShipping")),
         "rank": item.get("rank") or 999,
-        # 골드박스 응답에 원가/할인율이 실려 오는 경우가 있어 방어적으로 수집
-        "orig_price": int(item.get("originalPrice")
-                          or item.get("basePrice")
-                          or item.get("productOriginalPrice") or 0),
-        "discount_rate": int(item.get("discountRate")
-                             or item.get("productDiscountRate") or 0),
+        # 쿠팡 파트너스 API는 원가/할인율/리뷰수를 주지 않는다(2026-08 실측 확인).
+        # 비교가는 전적으로 자체 가격 이력에서 만든다.
+        "orig_price": 0,
+        "discount_rate": 0,
         "category_id": category_id,
         "category_name": item.get("categoryName") or "",
     }
