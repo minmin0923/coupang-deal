@@ -148,9 +148,18 @@ def main():
                      and not scoring.hard_cut(g)][:4]
         picks = picks[:config.GOLDBOX_SHOW]
 
-        msg = notify.live_message(hits, picks, now)
-        if msg and notify.send(msg):
-            for x in hits + picks:
+        if hits or picks:
+            notify.send(notify.header_message(len(hits), len(picks), now))
+            sent = []
+            for h in hits:
+                if notify.send_photo(h.get("image"), notify.deal_caption(h)):
+                    sent.append(h)
+                time.sleep(0.6)          # 텔레그램 속도 제한 여유
+            for g in picks:
+                if notify.send_photo(g.get("image"), notify.gold_caption(g)):
+                    sent.append(g)
+                time.sleep(0.6)
+            for x in sent:
                 store.mark_sent(con, x["product_id"], x["price"], at)
         print(f"발송 — 급락 {len(hits)}건 / 골드박스 {len(picks)}건")
 
